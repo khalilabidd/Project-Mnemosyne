@@ -49,6 +49,11 @@ class HybridSCDDeltaManager:
         if not self.permissions_path.exists():
             with open(self.permissions_path, 'w') as f:
                 json.dump({}, f, indent=2)
+        # initialize column permissions store
+        self.column_permissions_path = self.metadata_dir / "column_permissions.json"
+        if not self.column_permissions_path.exists():
+            with open(self.column_permissions_path, 'w') as f:
+                json.dump({}, f, indent=2)
 
     def set_row_permissions(self, key_values: Dict, allowed_users: List[str]):
         """Grant access for a specific primary-key tuple to a list of users/roles."""
@@ -454,7 +459,7 @@ class HybridSCDDeltaManager:
 if __name__ == "__main__":
     # Initialize manager
     manager = HybridSCDDeltaManager(
-        base_path=r"c:\Users\khali\scripts\parquet_warehouse",
+        base_path=r"C:\Users\khali\projects\Project-Mnemosyne",
         primary_keys=['customer_id', 'product_id']
     )
     
