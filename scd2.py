@@ -44,6 +44,99 @@ class HybridSCDDeltaManager:
             schema_history = {"versions": []}
             with open(self.schema_history_path, 'w') as f:
                 json.dump(schema_history, f, indent=2)
+        # initialize permissions store
+        self.permissions_path = self.metadata_dir / "row_permissions.json"
+        if not self.permissions_path.exists():
+            with open(self.permissions_path, 'w') as f:
+                json.dump({}, f, indent=2)
+
+    def set_row_permissions(self, key_values: Dict, allowed_users: List[str]):
+        """Grant access for a specific primary-key tuple to a list of users/roles."""
+        key = json.dumps(key_values, sort_keys=True)
+        with open(self.permissions_path, 'r') as f:
+            perms = json.load(f)
+        perms[key] = allowed_users
+        with open(self.permissions_path, 'w') as f:
+            json.dump(perms, f, indent=2)
+
+    def set_column_permissions(self, column: str, allowed_users: List[str]):
+        """Grant access to a specific column for a list of users/roles.
+        If a column is not present in the permissions store it is visible to all.
+        """
+        with open(self.column_permissions_path, 'r') as f:
+            col_perms = json.load(f)
+        col_perms[column] = allowed_users
+        with open(self.column_permissions_path, 'w') as f:
+            json.dump(col_perms, f, indent=2)
+
+
+    def _filter_df_by_user(self, df: pd.DataFrame, user_id: Optional[str] = None, user_roles: Optional[List[str]] = None) -> pd.DataFrame:
+        """Filter rows and columns based on row- and column-level permissions.
+
+        Rules:
+          - If user_id is None -> full access.
+          - Admin role bypasses checks.
+          - If row permissions file is empty -> allow all rows.
+          - If column not present in column permissions -> visible to all.
+          - Primary key columns are always retained (required for row context).
+        """
+        if user_id is None:
+            return df
+
+        user_roles = user_roles or []
+        if 'admin' in user_roles:
+            return df
+
+        # Load permissions safely
+        try:
+            with open(self.permissions_path, 'r') as f:
+                row_perms = json.load(f)
+        except:
+            row_perms = {}
+
+        try:
+            with open(self.column_permissions_path, 'r') as f:
+                col_perms = json.load(f)
+        except:
+            col_perms = {}
+
+        # ROW filtering
+        if row_perms:
+            def row_key(row):
+                return json.dumps({k: row[k] for k in self.primary_keys}, sort_keys=True)
+            keys = df.apply(row_key, axis=1)
+            def allowed_for_row(k):
+                if k not in row_perms:
+                    return False
+                allowed = set(row_perms[k])
+                if user_id in allowed:
+                    return True
+                if set(user_roles) & allowed:
+                    return True
+                return False
+            allowed_mask = keys.apply(allowed_for_row)
+            df = df[allowed_mask.values].reset_index(drop=True)
+
+        # COLUMN filtering
+        # Always keep primary key columns and essential metadata
+        always_keep = set(self.primary_keys + ['effective_date', 'end_date', 'is_current', 'operation_date', 'row_hash'])
+        visible_cols = []
+        for col in df.columns:
+            if col in always_keep:
+                visible_cols.append(col)
+                continue
+            if not col_perms:
+                visible_cols.append(col)
+                continue
+            if col not in col_perms:
+                visible_cols.append(col)
+                continue
+            allowed = set(col_perms.get(col, []))
+            if user_id in allowed or (set(user_roles) & allowed):
+                visible_cols.append(col)
+        # If no non-PK column remains, return at least PKs + metadata
+        visible_cols = [c for c in df.columns if c in visible_cols]
+        return df[visible_cols].reset_index(drop=True)
     
     def _get_row_hash(self, row: pd.Series, exclude_cols: Optional[List[str]] = None) -> str:
         """
@@ -296,13 +389,14 @@ class HybridSCDDeltaManager:
         if self.monthly_snapshots:
             changelog.to_parquet(self.base_path / f"changelog_{process_date.strftime('%Y%m')}.parquet", index=False)
 
-    def get_current_state(self) -> pd.DataFrame:
-        """Get the current state of all records (is_current == True)"""
+    def get_current_state(self, user_id: Optional[str] = None, user_roles: Optional[List[str]] = None) -> pd.DataFrame:
+        """Get the current state of all records (is_current == True) with row/column-level filtering"""
         scd = pd.read_parquet(self.scd_type2_path)
-        return scd[scd['is_current'] == True].reset_index(drop=True)
+        result = scd[scd['is_current'] == True].reset_index(drop=True)
+        return self._filter_df_by_user(result, user_id, user_roles)
     
-    def get_historical_view(self, as_of_date: datetime) -> pd.DataFrame:
-        """Get data as it was on a specific date"""
+    def get_historical_view(self, as_of_date: datetime, user_id: Optional[str] = None, user_roles: Optional[List[str]] = None) -> pd.DataFrame:
+        """Get data as it was on a specific date (filtered by user)."""
         scd = pd.read_parquet(self.scd_type2_path)
         
         # Records effective before or on the date and either no end_date or end_date after the date
@@ -311,17 +405,19 @@ class HybridSCDDeltaManager:
             (scd['end_date'].isna()) | (scd['end_date'] > as_of)
         )
         
-        return scd[mask].reset_index(drop=True)
+        result = scd[mask].reset_index(drop=True)
+        return self._filter_df_by_user(result, user_id, user_roles)
     
-    def get_record_history(self, key_values: Dict) -> pd.DataFrame:
-        """Get complete history of a specific record by primary key"""
+    def get_record_history(self, key_values: Dict, user_id: Optional[str] = None, user_roles: Optional[List[str]] = None) -> pd.DataFrame:
+        """Get complete history of a specific record by primary key (filtered by user)."""
         scd = pd.read_parquet(self.scd_type2_path)
         
         mask = pd.Series([True] * len(scd), index=scd.index)
         for key, value in key_values.items():
             mask &= (scd[key] == value)
         
-        return scd[mask].sort_values('effective_date').reset_index(drop=True)
+        result = scd[mask].sort_values('effective_date').reset_index(drop=True)
+        return self._filter_df_by_user(result, user_id, user_roles)
     
     def get_changelog(self, operation_type: Optional[str] = None,
                      start_date: Optional[datetime] = None,
