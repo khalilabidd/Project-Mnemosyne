@@ -93,6 +93,3 @@ df = manager.get_current_state(user_id='alice', user_roles=['analyst'])
 
 **Security & audit**
 - The built-in ACLs are minimal and intended for lightweight/local control. Add audit logging (who changed ACLs, and access attempts) and strengthen storage/permissions before using in production.
-
-**License / Notes**
-- See source comments in scd2.py for implementation details.
