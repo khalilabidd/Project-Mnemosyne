@@ -5,9 +5,9 @@ from pathlib import Path
 from typing import Optional, List, Dict, Tuple
 import hashlib
 
-class HybridSCDDeltaManager:
+class SCDManager:
     """
-    Hybrid approach combining SCD Type 2 with Delta Lake principles.
+    SCD Type 2 implementation.
     Handles: INSERT, UPDATE, DELETE, column additions/removals
     """
     
@@ -29,7 +29,6 @@ class HybridSCDDeltaManager:
         self.scd_type2_path = self.base_path / "scd_type2_table.parquet"
         self.metadata_dir = self.base_path / "metadata"
         self.schema_history_path = self.metadata_dir / "schema_history.json"
-        self.changelog_path = self.base_path / "changelog.parquet"
         
         # Create directories
         self.metadata_dir.mkdir(parents=True, exist_ok=True)
@@ -319,9 +318,6 @@ class HybridSCDDeltaManager:
                 scd_table.loc[mask, 'end_date'] = process_date.date()
                 scd_table.loc[mask, 'is_current'] = False
                 
-                # Log deletions
-                self._log_delta_operation(scd_table.loc[mask], process_date, 'DELETE')
-            
             # Process UPDATES: Deactivate old, add new with version
             if not update_keys.empty:
                 mask = scd_table.set_index(self.primary_keys).index.isin(
@@ -336,23 +332,16 @@ class HybridSCDDeltaManager:
                 # Add updated records with new effective date
                 scd_table = pd.concat([scd_table, new_data.loc[mask]], ignore_index=True)
                 
-                # Log updates
-                self._log_delta_operation(new_data.loc[mask], process_date, 'UPDATE')
-            
             # Process INSERTIONS: Add new records
             if not insertion_keys.empty:
                 mask = new_data.set_index(self.primary_keys).index.isin(
                     insertion_keys.set_index(self.primary_keys).index
                 )
                 scd_table = pd.concat([scd_table, new_data.loc[mask]], ignore_index=True)
-                
-                # Log insertions
-                self._log_delta_operation(new_data.loc[mask], process_date, 'INSERT')
         else:
             # First load: all records are insertions
             scd_table = self._add_metadata_columns(new_data, process_date)
             stats['insertions'] = len(scd_table)
-            self._log_delta_operation(scd_table, process_date, 'INSERT')
         
         # Save updated SCD Type 2 table
         scd_table.to_parquet(self.scd_type2_path, index=False)
@@ -364,35 +353,6 @@ class HybridSCDDeltaManager:
         stats['total_current_records'] = len(scd_table[scd_table['is_current'] == True])
         
         return stats
-
-    def _log_delta_operation(self, data: pd.DataFrame, process_date: datetime, operation_type: str):
-        """Log operations to delta log"""
-        # Load existing changelog
-        try:
-            changelog = pd.read_parquet(self.changelog_path)
-            if self.monthly_snapshots:
-                mask = ((changelog['effective_date'].dt.month == process_date.month) & \
-                        (changelog['effective_date'].dt.year == process_date.year)) | (changelog['is_current'] == True)
-                changelog = changelog.loc[mask]
-
-        except:
-            changelog = pd.DataFrame()
-        
-        # Prepare log entry
-        data_copy = data.copy()
-        data_copy['operation'] = operation_type
-
-        
-        # Align columns
-        if not changelog.empty:
-            changelog = self._align_schemas(changelog, data_copy)
-            data_copy = self._align_schemas(data_copy, changelog)
-        
-        # Append to changelog
-        changelog = pd.concat([changelog, data_copy], ignore_index=True)
-        changelog.to_parquet(self.changelog_path, index=False)
-        if self.monthly_snapshots:
-            changelog.to_parquet(self.base_path / f"changelog_{process_date.strftime('%Y%m')}.parquet", index=False)
 
     def get_current_state(self, user_id: Optional[str] = None, user_roles: Optional[List[str]] = None) -> pd.DataFrame:
         """Get the current state of all records (is_current == True) with row/column-level filtering"""
@@ -422,35 +382,15 @@ class HybridSCDDeltaManager:
             mask &= (scd[key] == value)
         
         result = scd[mask].sort_values('effective_date').reset_index(drop=True)
-        return self._filter_df_by_user(result, user_id, user_roles)
-    
-    def get_changelog(self, operation_type: Optional[str] = None,
-                     start_date: Optional[datetime] = None,
-                     end_date: Optional[datetime] = None) -> pd.DataFrame:
-        """Query the changelog"""
-        changelog = pd.read_parquet(self.changelog_path)
-        
-        if operation_type:
-            changelog = changelog[changelog['operation'] == operation_type]
-        
-        if start_date:
-            changelog = changelog[changelog['operation_date'] >= start_date]
-        
-        if end_date:
-            changelog = changelog[changelog['operation_date'] <= end_date]
-        
-        return changelog.reset_index(drop=True)
+        return self._filter_df_by_user(result, user_id, user_roles))
     
     def get_statistics(self) -> Dict:
         """Get overall statistics"""
         scd = pd.read_parquet(self.scd_type2_path)
-        changelog = pd.read_parquet(self.changelog_path)
         
         return {
             'total_current_records': len(scd[scd['is_current'] == True]),
             'total_historical_records': len(scd),
-            'total_operations_logged': len(changelog),
-            'operations_by_type': changelog['operation'].value_counts().to_dict() if not changelog.empty else {},
             'schema_versions': len(json.load(open(self.schema_history_path))['versions'])
         }
 
@@ -458,7 +398,7 @@ class HybridSCDDeltaManager:
 # Example usage
 if __name__ == "__main__":
     # Initialize manager
-    manager = HybridSCDDeltaManager(
+    manager = SCDManager(
         base_path=r"C:\Users\khali\projects\Project-Mnemosyne",
         primary_keys=['customer_id', 'product_id']
     )
@@ -530,9 +470,6 @@ if __name__ == "__main__":
     
     print("\nHistory of customer 1, product A:")
     print(manager.get_record_history({'customer_id': 1, 'product_id': 'A'}))
-    
-    print("\nChangelog:")
-    print(manager.get_changelog())
     
     print("\nStatistics:")
     for key, value in manager.get_statistics().items():

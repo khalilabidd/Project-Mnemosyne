@@ -1,17 +1,16 @@
-# Hybrid SCD Type 2 + Delta Manager
+#  SCD Type 2 Manager
 
-This project provides a lightweight, file-based implementation combining Slowly Changing Dimension (SCD) Type 2 semantics with Delta-style changelog recording using Parquet files and pandas.
+This project provides a lightweight, file-based implementation combining Slowly Changing Dimension (SCD) Type 2 semantics using Parquet files and pandas.
 
 **Features**
-- SCD Type 2 versioning (effective_date, end_date, is_current)
-- Delta-style changelog (operation, operation_date)
+- SCD Type 2 versioning (effective_date, end_date, is_current, operation_date)
 - Automatic schema history tracking ([parquet_warehouse/metadata/schema_history.json](parquet_warehouse/metadata/schema_history.json))
 - Handles INSERT / UPDATE / DELETE and column additions/removals¨
 - Row-level and column-level access control (ACLs) with simple JSON-backed stores
 
 
 **Core class**
-- `HybridSCDDeltaManager` — implemented in the project script [scd2.py](scd2). It manages the SCD table and changelog under a base parquet directory (default used in examples: `parquet_warehouse`).
+- `SCDManager` — implemented in the project script [scd2.py](scd2). It manages the SCD table under a base parquet directory (default used in examples: `parquet_warehouse`).
 
 **Requirements**
 - Python 3.8+
@@ -29,10 +28,10 @@ pip install pandas pyarrow
 
 ```python
 from datetime import datetime
-from scd2 import HybridSCDDeltaManager
+from scd2 import SCDManager
 import pandas as pd
 
-manager = HybridSCDDeltaManager(base_path=r"parquet_warehouse", primary_keys=['customer_id','product_id'])
+manager = SCDManager(base_path=r"parquet_warehouse", primary_keys=['customer_id','product_id'])
 
 df = pd.DataFrame({
     'customer_id': [1,2],
@@ -45,7 +44,6 @@ manager.process_daily_data(df, process_date=datetime(2026,1,1))
 
 **Files & layout**
 - SCD table: `parquet_warehouse/scd_type2_table.parquet`
-- Changelog: `parquet_warehouse/changelog.parquet`
 - Schema history: [parquet_warehouse/metadata/schema_history.json](parquet_warehouse/
 metadata/schema_history.json)
 - Row permissions: `parquet_warehouse/metadata/row_permissions.json`
@@ -89,7 +87,6 @@ df = manager.get_current_state(user_id='alice', user_roles=['analyst'])
 - `get_current_state()` — returns current (is_current==True) records
 - `get_historical_view(as_of_date)` — returns table state as of a given date
 - `get_record_history(key_values)` — full version history for a primary key
-- `get_changelog()` — query recorded operations
 
 **Security & audit**
 - The built-in ACLs are minimal and intended for lightweight/local control. Add audit logging (who changed ACLs, and access attempts) and strengthen storage/permissions before using in production.
